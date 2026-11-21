@@ -1,0 +1,1023 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#F3F6FB">
+<title>TCP Reno 快速恢复 · 动态模型</title>
+<style>
+:root{--page:#f3f6fb;--ink:#172033;--muted:#64748b;--line:#dce4ef;--blue:#2563eb;--blueD:#1746ad;--red:#dc3545;--redD:#a91627;--acc:var(--blue)}
+.mode-without{--acc:var(--red)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:radial-gradient(circle at 50% -20%,#e6eefc,transparent 46rem),var(--page);color:var(--ink);
+  font-family:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB","Noto Sans SC","HarmonyOS Sans SC","MiSans",sans-serif;-webkit-text-size-adjust:100%;text-size-adjust:100%;touch-action:manipulation;-webkit-user-select:none;user-select:none}
+#app{position:fixed;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+#stage{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;padding:12px 12px 6px}
+canvas{display:block;border-radius:14px}
+#bar{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;padding:4px 12px 12px}
+.prog{display:flex;gap:4px;width:100%;max-width:560px;margin:0 auto 8px}
+.prog i{flex:1;height:6px;border-radius:3px;background:#d3dceb;cursor:pointer;transition:background .2s}
+.prog i.done{background:#a9c0ec}.mode-without .prog i.done{background:#efb1b8}
+.prog i.on{background:var(--acc)}
+.btns{display:flex;gap:10px;width:100%;max-width:560px}
+button{flex:1;font:inherit;font-size:16px;min-height:44px;padding:6px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--ink);cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 3px 10px rgba(33,64,112,.06);transition:transform .12s,border-color .12s}
+button:active{transform:scale(.97)}
+button:disabled{opacity:.38}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
+button svg{width:18px;height:18px;flex:0 0 auto}
+@media (hover:hover){button:hover:not(:disabled){border-color:#aebcd0}}
+/* 横版：操作栏一行，进度条在按钮右侧 */
+.land #bar{flex-direction:row;justify-content:center;gap:14px;padding:2px 16px 14px}
+.land .btns{width:auto;max-width:none}
+.land button{flex:0 0 auto;min-width:104px}
+.land .prog{width:260px;margin:0}
+/* 手机横屏：按钮竖排在右侧，只显示图标，把高度全部留给画面 */
+#app.compact{flex-direction:row}
+.compact #stage{padding:6px 4px 6px 8px}
+.compact #bar{flex-direction:column;justify-content:center;width:auto;padding:6px 10px 6px 4px;gap:0}
+.compact .btns{flex-direction:column;width:auto;gap:8px}
+.compact button{flex:0 0 auto;min-width:50px;width:50px;min-height:50px;padding:0;border-radius:14px}
+.compact button .t{display:none}
+.compact button svg{width:22px;height:22px}
+.compact .prog{display:none}
+/* 竖屏：底部固定操作栏 */
+.port #stage{padding:8px 8px 4px}
+.port #bar{background:rgba(255,255,255,.86);border-top:1px solid rgba(203,217,236,.8);box-shadow:0 -6px 18px rgba(33,64,112,.06);padding:8px 12px 10px}
+.port button{font-size:15px;min-height:46px;padding:6px 4px}
+.port .prog{order:-1}
+.port button .t{white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="app" class="land mode-reno">
+  <div id="stage"><canvas id="cv" aria-label="TCP Reno 快速恢复动态模型"></canvas></div>
+  <div id="bar">
+    <div class="btns">
+      <button id="prev" aria-label="上一步"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="t">上一步</span></button>
+      <button id="play" class="primary" aria-label="播放"><svg viewBox="0 0 24 24" id="ico"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg><span class="t" id="playT">播放</span></button>
+      <button id="next" aria-label="下一步"><span class="t">下一步</span><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button id="reset" aria-label="重置"><svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v4h4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="t">重置</span></button>
+    </div>
+    <div class="prog" id="prog"></div>
+  </div>
+</div>
+<script>
+/* TCP Reno 快速恢复 · 扫码版渲染引擎（精修版2 + 手机竖屏版式；Canvas 2D，时间驱动）
+   RenoR4.draw(ctx, {mode, step, u, layout})  —— layout = 'land'（1600×860，与精修版2 完全一致）或 'port'（780×1320，手机竖屏）
+   step 0..14，u ∈ [0,1] 为 step-1 → step 的过渡进度 */
+(function (G) {
+'use strict';
+let W = 1600, H = 860; const LAST = 14;
+let FS = 1; // 信道内文字的放大系数（竖屏 > 1）
+const FONT = '"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB","Noto Sans SC","Source Han Sans SC","HarmonyOS Sans SC","MiSans",sans-serif';
+const C = {
+  page: '#F3F6FB', surface: '#FFFFFF', soft: '#F8FAFC', ink: '#172033', muted: '#64748B', faint: '#A3B0C2', line: '#DCE4EF',
+  blue: '#2563EB', blueD: '#1746AD', blueS: '#E8F0FF', blueM: '#7FA6F2',
+  orange: '#E56B18', orangeD: '#A84408', orangeS: '#FFF0DF', orangeM: '#F2A66A',
+  red: '#DC3545', redD: '#A91627', redS: '#FFE7E9', redM: '#EF8A94',
+  green: '#19935A', greenD: '#0D6A3C', greenS: '#E3F7ED', greenM: '#79C59E',
+  purple: '#7656D8', purpleD: '#4F35AD', purpleS: '#EEEAFE', purpleM: '#A796EA',
+  gold: '#E9A20F', goldD: '#9A6200', goldS: '#FFF5DA'
+};
+
+/* ---------------- 数据 ---------------- */
+const MODEL = {
+  reno: { cwnd: [8,8,8,8,8,8,8,7,8,9,10,11,11,4,4], flight: [0,3,0,8,8,8,8,8,8,9,10,11,11,3,4] },
+  without: { cwnd: [8,8,8,8,8,8,8,4,4,4,4,4,4,4,4], flight: [0,3,0,8,8,8,8,8,8,8,8,8,8,0,4] }
+};
+const DUP = [0,0,0,0,0,1,2,3,4,5,6,7,7,0,0];
+// [标题, 说明(reno), 说明(without), 结果(reno), 结果(without)]
+const EV = [
+  ['准备', '窗口 cwnd = 8 MSS，发送方即将开始发送。', null, '等待开始', null],
+  ['发送报文 1～3', '发送方依次发出报文 1、2、3。', null, 'cwnd = 8，可发送 5', null],
+  ['返回 ACK4', '1～3 按序到达，接收方累计确认，返回 ACK4。', null, '收到 ACK4', null],
+  ['连续发送报文 4～11', '窗口内的 8 个报文连续发出，报文 4 在最前面。', null, '8 个报文在途', null],
+  ['报文 4 丢失', '报文 4 在途中丢失，5～11 继续前进；此时发送方并不知道。', null, '报文 4 丢失', null],
+  ['报文 5 到达', '5 乱序到达，接收方先缓存，返回第 1 个重复 ACK4。', null, '重复 ACK4 × 1', null],
+  ['报文 6 到达', '继续缓存，返回第 2 个重复 ACK4。', null, '重复 ACK4 × 2', null],
+  ['第 3 个重复 ACK：快重传', '收到第 3 个重复 ACK，立即重传 4：ssthresh = 8 ÷ 2 = 4，cwnd = 4 + 3 = 7。', '收到第 3 个重复 ACK，立即重传 4：ssthresh = 4，cwnd 直接取 4，不膨胀。', 'ssthresh = 4，cwnd = 7', 'ssthresh = 4，cwnd = 4'],
+  ['第 4 个重复 ACK', '8 到达；cwnd 临时 +1 = 8，但在途已有 8 个，暂不能发新报文。', '8 到达；cwnd 仍为 4，在途 8 个，不能发送。', 'cwnd = 8，暂不能新发', '在途 8 > cwnd 4'],
+  ['第 5 个重复 ACK', '9 到达；cwnd 临时增至 9，腾出 1 个额度，发送新报文 12。', '9 到达；窗口仍被占满，报文 12 发不出去。', 'cwnd = 9，发送 12', '窗口关闭，12 未发送'],
+  ['第 6 个重复 ACK', '10 到达；cwnd 增至 10，发送新报文 13。', '10 到达；报文 13 仍发不出去。', 'cwnd = 10，发送 13', '窗口关闭，13 未发送'],
+  ['第 7 个重复 ACK', '11 到达；cwnd 增至 11，发送新报文 14，数据流没有中断。', '11 到达；信道里只剩重传的 4，逐渐空闲。', 'cwnd = 11，发送 14', '信道逐渐空闲'],
+  ['重传的报文 4 到达', '4 补齐缺口，接收方一次交付 4～11，准备返回 ACK12。', null, '产生 ACK12', null],
+  ['ACK12 返回，快恢复结束', 'ACK12 累计确认 4～11；cwnd 收缩为 ssthresh = 4。', 'ACK12 累计确认 4～11；cwnd 保持 4，窗口这才放开。', 'cwnd = ssthresh = 4', 'cwnd 保持 4'],
+  ['进入拥塞避免', '在途 12～14 共 3 个，可再发 1 个：发送 15，之后按 +1 线性增长。', '此时才发出 12～15：恢复期间信道曾经空闲。', '发送 15，链路连续', '此时才发送 12～15']
+];
+const RNOTE = ['尚未开始，等待报文 1。','报文 1～3 正在途中。','已确认 1～3，下一个期望 4。','等待报文 4～11 到达。','仍在等待报文 4。','5 乱序到达：先缓存，回复 ACK4。','缓存 5～6，仍回复 ACK4。','缓存 5～7，第 3 次回复 ACK4。','缓存 5～8，仍缺报文 4。','缓存 5～9，仍缺报文 4。','缓存 5～10，仍缺报文 4。','5～11 都已缓存，只缺 4。','4 补齐缺口，4～11 一并交付。','下一个期望报文为 12。','进入拥塞避免阶段。'];
+const XL = ['准备','发1～3','ACK4','发4～11','丢4','重复1','重复2','重复3','重复4','重复5','重复6','重复7','4到达','ACK12','拥塞避免'];
+function chanText(mode, s) {
+  if (s === 0) return '信道为空，等待开始';
+  if (s === 1) return '报文 1～3 正在传输';
+  if (s === 2) return 'ACK4 返回发送方';
+  if (s === 3) return '4～11 连续进入信道';
+  if (s === 4) return '4 已丢失，5～11 继续前进';
+  if (s <= 6) return `报文 ${s} 到达，返回重复 ACK4`;
+  if (s === 7) return '快重传：重传报文 4';
+  if (s <= 11) return mode === 'reno' ? '临时膨胀让数据继续流动' : '在途 8 > cwnd 4，无法新发';
+  if (s === 12) return '重传的 4 到达接收方';
+  if (s === 13) return 'ACK12 返回发送方';
+  return mode === 'reno' ? '继续发送报文 15' : '此时才发送 12～15';
+}
+const ev = (mode, s, k) => (mode === 'without' && EV[s][k + 1] != null ? EV[s][k + 1] : EV[s][k]);
+
+/* 报文位置快照：id -> {u, lane, kind} */
+function snap(mode, s) {
+  const m = new Map(), set = (id, n, u, lane, kind) => m.set(id, { id, n, u, lane, kind: kind || 'data' });
+  if (s === 1) { set('1', 1, .68, 0); set('2', 2, .54, 1); set('3', 3, .40, 2); }
+  if (s === 3) for (let n = 4; n <= 11; n++) set(String(n), n, .82 - (n - 4) * .075, (n - 4) % 4);
+  if (s === 4) for (let n = 5; n <= 11; n++) set(String(n), n, .82 - (n - 4) * .075 + .04, (n - 4) % 4);
+  if (s >= 5 && s <= 11) {
+    for (let n = s + 1; n <= 11; n++) set(String(n), n, .90 - (n - s - 1) * .10, (n - 4) % 4);
+    if (s >= 7) set('r4', 4, .28 + (s - 7) * .11, 1, 'retx');
+    if (mode === 'reno') {
+      if (s >= 9) set('12', 12, .25 + (s - 9) * .13, 0);
+      if (s >= 10) set('13', 13, .22 + (s - 10) * .13, 2);
+      if (s >= 11) set('14', 14, .19, 3);
+    }
+  }
+  if ((s === 12 || s === 13) && mode === 'reno') { set('12', 12, .72, 0); set('13', 13, .59, 2); set('14', 14, .46, 3); }
+  if (s === 14) {
+    if (mode === 'reno') { set('12', 12, .84, 0); set('13', 13, .72, 2); set('14', 14, .60, 3); set('15', 15, .28, 1); }
+    else { set('12', 12, .52, 0); set('13', 13, .40, 1); set('14', 14, .28, 2); set('15', 15, .16, 3); }
+  }
+  return m;
+}
+/* 各步的时间窗 */
+function timing(mode, s) {
+  const t = { move: [0, .36], enter: (i) => [.72, .98], arr: (i) => [0, .36], ack: null, tR: null, tS: null, tC: .5, drop: null };
+  if (s === 1) { t.enter = i => [.02 + .1 * i, .6 + .1 * i]; t.tS = .02; t.tC = .1; t.tR = .1; }
+  if (s === 2) { t.arr = i => [.03 * i, .34 + .03 * i]; t.tR = .37; t.ack = [.40, .80, 'ACK4']; t.tS = .80; t.tC = .80; }
+  if (s === 3) { t.enter = i => i === 0 ? [0, .62] : [.08 + .035 * (i - 1), .66 + .035 * (i - 1)]; t.tS = .02; t.tC = .1; t.tR = .1; }
+  if (s === 4) { t.drop = [0, .62]; t.move = [.05, .55]; t.tC = .5; t.tR = .5; }
+  if (s === 5 || s === 6 || s === 8) { t.tR = .36; t.ack = [.38, .78, 'ACK4']; t.tS = .78; t.tC = .78; }
+  if (s === 7 || (s >= 9 && s <= 11)) { t.move = [0, .32]; t.arr = () => [0, .32]; t.tR = .32; t.ack = [.34, .66, 'ACK4']; t.tS = .66; t.tC = .66; }
+  if (s === 12) { t.move = [0, .42]; t.arr = () => [0, .42]; t.tR = .42; t.tC = .45; }
+  if (s === 13) { t.ack = [.02, .5, 'ACK12']; t.tS = .5; t.tC = .5; }
+  if (s === 14) { t.move = [.05, .7]; t.enter = mode === 'reno' ? () => [.08, .7] : i => [.04 + .07 * i, .62 + .07 * i]; t.tS = .05; t.tC = .1; t.tR = .1; }
+  return t;
+}
+function sender(mode, s) {
+  const M = MODEL[mode], c = M.cwnd[s], ss = s >= 7 ? 4 : null, recover = mode === 'reno' && s >= 7 && s <= 12;
+  const shelf = [];
+  for (let n = 1; n <= 15; n++) {
+    let st;
+    if (n <= 3) st = s >= 2 ? 'ack' : s >= 1 ? 'sent' : 'pend';
+    else if (n === 4) st = s >= 13 ? 'ack' : s >= 7 ? 'retx' : s >= 4 ? 'loss' : s >= 3 ? 'sent' : 'pend';
+    else if (n <= 11) st = s >= 13 ? 'ack' : (s >= 5 && n <= s) ? 'buf' : s >= 3 ? 'sent' : 'pend';
+    else { const at = mode === 'reno' ? { 12: 9, 13: 10, 14: 11, 15: 14 }[n] : 14; st = s >= at ? 'sent' : 'pend'; }
+    shelf.push(st);
+  }
+  return { cwnd: c, ssth: ss, avail: Math.max(0, c - M.flight[s]), recover, dup: DUP[s], shelf,
+    cap: ss == null ? `${c} MSS` : recover ? `4 + 临时 ${c - 4} MSS` : '4 MSS' };
+}
+function receiver(s) {
+  const slots = [];
+  for (let n = 4; n <= 11; n++) slots.push(s >= 12 ? 'ack' : n === 4 ? (s >= 5 ? 'miss' : 'empty') : (s >= 5 && n <= Math.min(11, s) ? 'buf' : 'empty'));
+  return { expect: s >= 12 ? 12 : s >= 2 ? 4 : 1, slots, cap: s >= 12 ? '4～11 已连续接收' : s < 5 ? '等待报文 4' : s === 5 ? '已缓存 5' : `已缓存 5～${Math.min(11, s)}`, note: RNOTE[s] };
+}
+
+/* ---------------- 工具 ---------------- */
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const seg = (u, a, b) => clamp((u - a) / (b - a));
+const eIO = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const eOut = k => 1 - Math.pow(1 - k, 3);
+const eIn = k => k * k;
+const eMove = k => { /* 与原版相同的 cubic-bezier(.25,.72,.32,1) 近似 */ return 1 - Math.pow(1 - k, 2.6); };
+const lerp = (a, b, k) => a + (b - a) * k;
+/* 兼容：部分旧版安卓 WebView / 微信内核没有 roundRect */
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    let a = Array.isArray(r) ? r : [r == null ? 0 : r];
+    if (a.length === 1) a = [a[0], a[0], a[0], a[0]]; else if (a.length === 2) a = [a[0], a[1], a[0], a[1]]; else if (a.length === 3) a = [a[0], a[1], a[2], a[1]];
+    const m = Math.min(Math.abs(w), Math.abs(h)) / 2, [tl, tr, br, bl] = a.map(v => Math.max(0, Math.min(+v || 0, m)));
+    this.moveTo(x + tl, y); this.lineTo(x + w - tr, y); this.arcTo(x + w, y, x + w, y + tr, tr);
+    this.lineTo(x + w, y + h - br); this.arcTo(x + w, y + h, x + w - br, y + h, br);
+    this.lineTo(x + bl, y + h); this.arcTo(x, y + h, x, y + h - bl, bl);
+    this.lineTo(x, y + tl); this.arcTo(x, y, x + tl, y, tl); this.closePath();
+    return this;
+  };
+}
+function rr(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, r); }
+function font(size, w) { return `${w || 400} ${size}px ${FONT}`; }
+function txt(g, s, x, y, size, color, o) {
+  o = o || {}; g.font = font(size, o.w); g.fillStyle = color; g.textAlign = o.a || 'left'; g.textBaseline = o.b || 'alphabetic';
+  if (o.alpha != null) { const a = g.globalAlpha; g.globalAlpha = a * o.alpha; g.fillText(s, x, y); g.globalAlpha = a; } else g.fillText(s, x, y);
+}
+function tw(g, s, size, w) { g.font = font(size, w); return g.measureText(s).width; }
+function shadowCard(g, x, y, w, h, r, fill, stroke, sh) {
+  g.save();
+  if (sh) { g.shadowColor = sh[0]; g.shadowBlur = sh[1]; g.shadowOffsetY = sh[2]; }
+  rr(g, x, y, w, h, r); g.fillStyle = fill; g.fill();
+  g.restore();
+  if (stroke) { rr(g, x + .5, y + .5, w - 1, h - 1, r); g.strokeStyle = stroke; g.lineWidth = 1; g.stroke(); }
+}
+/* 交叉淡化：在 [t,t+d] 内从 a 状态过渡到 b 状态；fn(state, alpha, k) */
+function xf(g, a, b, u, t, d, fn) {
+  if (a === b || t == null) { fn(b, 1, 1); return; }
+  const k = eIO(seg(u, t, t + (d || .14)));
+  if (k <= 0) { fn(a, 1, 0); return; }
+  if (k >= 1) { fn(b, 1, 1); return; }
+  g.save(); g.globalAlpha *= 1 - k; fn(a, 1 - k, k); g.restore();
+  g.save(); g.globalAlpha *= k; fn(b, k, k); g.restore();
+}
+let HATCH = null;
+function hatch(g) {
+  if (HATCH) return HATCH;
+  const c = (typeof document !== 'undefined') ? Object.assign(document.createElement('canvas'), { width: 10, height: 10 }) : new OffscreenCanvas(10, 10);
+  const h = c.getContext('2d'); h.fillStyle = '#FFF8EF'; h.fillRect(0, 0, 10, 10);
+  h.strokeStyle = '#FBD3A8'; h.lineWidth = 3.5; h.beginPath();
+  for (let i = -10; i <= 20; i += 10) { h.moveTo(i, 10); h.lineTo(i + 10, 0); }
+  h.stroke();
+  HATCH = g.createPattern(c, 'repeat'); return HATCH;
+}
+
+/* ---------------- 布局 ---------------- */
+const LY_LAND = {
+  head: [16, 12, 1568, 60],
+  stage: [16, 84, 1568, 400], snd: [16, 84, 340, 400], ch: [356, 84, 888, 400], rcv: [1244, 84, 340, 400],
+  ev: [16, 496, 1568, 70], cht: [16, 578, 1568, 266]
+};
+/* 透视地面：v = 深度(0 远 1 近)，u = 沿信道进度 */
+const P_LAND = { cx: 800, Wn: 900, zf: 1.3, H0: -388, K: 820, u0: .05, u1: .95 };
+/* 竖屏：信道占满宽度，下面是发送方 | 接收方、事件条、曲线 */
+/* 竖屏高度可变（1320～1560）：屏幕越长，信道与曲线越高，填满整屏 */
+let LY_PORT = null, P_PORT = null, PORT_H = 0;
+function portLayout(Hp) {
+  Hp = Math.max(1320, Math.min(1560, Math.round(Hp || 1320)));
+  if (Hp === PORT_H) return; PORT_H = Hp;
+  const extra = Hp - 1320, chH = 346 + Math.round(extra * .45), cht = 346 + (extra - Math.round(extra * .45));
+  const chY = 86, sY = chY + chH + 12, eY = sY + 372 + 12, cY = eY + 118 + 12;
+  LY_PORT = { head: [16, 10, 748, 64], ch: [16, chY, 748, chH], snd: [16, sY, 370, 372], rcv: [394, sY, 370, 372], ev: [16, eY, 748, 118], cht: [16, cY, 748, cht] };
+  const K = 823 * (1 + (chH / 346 - 1) * .6);
+  P_PORT = { cx: 390, Wn: 770, zf: 1.3, H0: chY + chH - 42 - K, K, u0: .05, u1: .95 };
+}
+portLayout(1320);
+let LY = LY_LAND, P = P_LAND;
+const sc = v => 1 / lerp(P.zf, 1, v);
+const fy = v => P.H0 + P.K * sc(v);
+const fx = (u, v) => P.cx + (lerp(P.u0, P.u1, u) - .5) * P.Wn * sc(v);
+const LANE = [0, .25, .5, .75], ACKV = 1.0;
+
+/* ---------------- 立体报文 ---------------- */
+const PAL = {
+  data: ['#5C8EF0', '#2563EB', '#1746AD'], retx: ['#A08DEB', '#7656D8', '#4F35AD'],
+  loss: ['#EF7481', '#DC3545', '#A91627'], ack: ['#54B983', '#19935A', '#0D6A3C']
+};
+function cube(g, x, y, s, kind, label, o) {
+  o = o || {};
+  const p = PAL[kind], w = (kind === 'ack' ? 86 : 62) * s, h = (kind === 'ack' ? 40 : 46) * s;
+  const dx = 13 * s, dy = 11 * s; // 斜二测：纵深向右上
+  g.save();
+  if (o.alpha != null) g.globalAlpha *= o.alpha;
+  const x0 = x - w / 2 - dx / 2, y0 = y - h; // 正面左上
+  // 接地阴影
+  if (!o.noShadow) {
+    g.save(); g.translate(x + 2, y - 1); g.scale(1, .3);
+    const rg = g.createRadialGradient(0, 0, 2, 0, 0, w * .78);
+    rg.addColorStop(0, 'rgba(31,64,118,0.28)'); rg.addColorStop(.6, 'rgba(31,64,118,0.10)'); rg.addColorStop(1, 'rgba(31,64,118,0)');
+    g.fillStyle = rg; g.beginPath(); g.arc(0, 0, w * .78, 0, Math.PI * 2); g.fill(); g.restore();
+  }
+  const cx = x0 + w / 2, cy = y0 + h / 2;
+  if (o.rot || o.scale) { g.translate(cx, cy); if (o.rot) g.rotate(o.rot); if (o.scale) g.scale(o.scale, o.scale); g.translate(-cx, -cy); }
+  const r = 5 * s;
+  // 顶面
+  g.beginPath(); g.moveTo(x0 + r * .6, y0); g.lineTo(x0 + dx + r * .6, y0 - dy); g.lineTo(x0 + w + dx, y0 - dy); g.lineTo(x0 + w, y0); g.closePath();
+  const tg = g.createLinearGradient(0, y0 - dy, 0, y0); tg.addColorStop(0, shade(p[0], .18)); tg.addColorStop(1, p[0]);
+  g.fillStyle = tg; g.fill(); g.lineJoin = 'round'; g.strokeStyle = p[2]; g.lineWidth = 1; g.stroke();
+  // 右侧面
+  g.beginPath(); g.moveTo(x0 + w, y0); g.lineTo(x0 + w + dx, y0 - dy); g.lineTo(x0 + w + dx, y0 - dy + h - r * .6); g.lineTo(x0 + w, y0 + h - r * .3); g.closePath();
+  const sg = g.createLinearGradient(x0 + w, 0, x0 + w + dx, 0); sg.addColorStop(0, p[2]); sg.addColorStop(1, shade(p[2], -.12));
+  g.fillStyle = sg; g.fill(); g.strokeStyle = p[2]; g.stroke();
+  // 正面
+  const lg = g.createLinearGradient(0, y0, 0, y0 + h); lg.addColorStop(0, shade(p[1], .08)); lg.addColorStop(1, shade(p[1], -0.1));
+  rr(g, x0, y0, w, h, [2, 2, r, r]); g.fillStyle = lg; g.fill();
+  g.strokeStyle = p[2]; g.lineWidth = 1; g.stroke();
+  g.beginPath(); g.moveTo(x0 + 3, y0 + 1.2); g.lineTo(x0 + w - 3, y0 + 1.2); g.strokeStyle = 'rgba(255,255,255,0.5)'; g.lineWidth = 1.3; g.stroke();
+  // 编号
+  g.save(); g.shadowColor = 'rgba(0,0,0,0.18)'; g.shadowOffsetY = 1; g.shadowBlur = 1;
+  txt(g, String(label), cx, cy + 1, Math.round((kind === 'ack' ? 18 : 23) * s * FS), '#FFFFFF', { w: 800, a: 'center', b: 'middle' });
+  g.restore();
+  if (o.tag) {
+    const t = o.tag, fs = Math.round((13 * s + 1) * FS), tww = tw(g, t, fs, 700) + 12 * FS, th = fs + 8 * FS, ty = y0 - dy - th - 5;
+    rr(g, cx + dx / 2 - tww / 2, ty, tww, th, 6); g.fillStyle = C.purpleD; g.fill();
+    txt(g, t, cx + dx / 2, ty + th / 2 + 1, fs, '#FFFFFF', { w: 700, a: 'center', b: 'middle' });
+  }
+  g.restore();
+}
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16); let r = n >> 16, gg = (n >> 8) & 255, b = n & 255;
+  const f = v => Math.round(k < 0 ? v * (1 + k) : v + (255 - v) * k);
+  return `rgb(${f(r)},${f(gg)},${f(b)})`;
+}
+
+/* ---------------- 各区域 ---------------- */
+function drawHead(g, mode, step) {
+  const [x, y, w, h] = LY.head;
+  // 标题：左侧细色条 + 标题
+  rr(g, x + 2, y + 14, 6, 32, 3); g.fillStyle = mode === 'reno' ? C.blue : C.red; g.fill();
+  txt(g, 'TCP Reno 快速恢复', x + 22, y + 41, 32, C.ink, { w: 800 });
+  // 模式切换（右对齐到舞台右缘）
+  const segW = [132, 132], sx = x + w - 5 - segW[0] - segW[1], sy = y + 10;
+  shadowCard(g, sx - 5, sy - 5, segW[0] + segW[1] + 10, 48, 12, '#FFFFFF', C.line, ['rgba(33,64,112,0.06)', 12, 3]);
+  ['标准 Reno', '无临时膨胀'].forEach((t, i) => {
+    const on = (i === 0) === (mode === 'reno'), bx = sx + (i ? segW[0] : 0);
+    if (on) { rr(g, bx, sy, segW[i], 38, 9); g.fillStyle = mode === 'reno' ? C.blue : C.red; g.fill(); }
+    txt(g, t, bx + segW[i] / 2, sy + 20, 18, on ? '#FFFFFF' : C.muted, { w: on ? 700 : 500, a: 'center', b: 'middle' });
+  });
+}
+
+function drawSender(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.snd, ix = x + 22, iw = w - 44;
+  const A = sender(mode, prevStep), B = sender(mode, step), tS = tm ? tm.tS : null;
+  const acc = mode === 'reno' ? C.blue : C.red, accD = mode === 'reno' ? C.blueD : C.redD, accS = mode === 'reno' ? C.blueS : C.redS;
+  // 背景
+  const bg = g.createLinearGradient(0, y, 0, y + h); bg.addColorStop(0, '#FFFFFF'); bg.addColorStop(1, C.soft);
+  g.fillStyle = bg; g.save(); rr(g, x, y, w, h, [20, 0, 0, 20]); g.fill(); g.restore();
+  g.fillStyle = C.line; g.fillRect(x + w - 1, y, 1, h);
+  // 标题
+  rr(g, ix, y + 18, 42, 42, 12); g.fillStyle = C.blueS; g.fill();
+  txt(g, 'S', ix + 21, y + 40, 22, C.blueD, { w: 800, a: 'center', b: 'middle' });
+  txt(g, '发送方', ix + 54, y + 40, 24, C.ink, { w: 800, b: 'middle' });
+  // 重复 ACK 指示
+  const d0 = ix + iw - 40;
+  xf(g, A.dup, B.dup, u, tS, .1, (n) => {
+    txt(g, '重复ACK', d0 - 14, y + 44, 14, C.muted, { w: 600, a: 'right' });
+    for (let i = 0; i < 3; i++) {
+      g.beginPath(); g.arc(d0 + i * 15, y + 39, 5.5, 0, Math.PI * 2);
+      if (n > i) { g.fillStyle = n >= 3 ? C.gold : acc; g.fill(); } else { g.strokeStyle = C.faint; g.lineWidth = 1.6; g.stroke(); }
+    }
+    if (n > 3) txt(g, '+' + (n - 3), d0 + 48, y + 44, 14, C.goldD, { w: 800 });
+  });
+  if (tm && A.dup === 2 && B.dup === 3) {
+    const k = seg(u, tS, tS + .32);
+    if (k > 0 && k < 1) { g.save(); g.globalAlpha = 1 - k; g.strokeStyle = C.gold; g.lineWidth = 3 * (1 - k) + 1; g.beginPath(); g.arc(d0 + 15, y + 39, 16 + 22 * k, 0, Math.PI * 2); g.stroke(); g.restore(); }
+  }
+  // 指标
+  const mw = (iw - 16) / 3, my = y + 74, mh = 62;
+  [['cwnd', 'cwnd'], ['ssthresh', 'ssth'], ['可发送', 'avail']].forEach((m, i) => {
+    const mx = ix + i * (mw + 8);
+    rr(g, mx, my, mw, mh, 11); g.fillStyle = accS; g.fill();
+    txt(g, m[0], mx + mw / 2, my + 20, 14, C.muted, { w: 600, a: 'center' });
+    xf(g, A[m[1]], B[m[1]], u, tS, .14, (v, al, k) => {
+      const dy = (v === B[m[1]] ? 1 - k : -k) * 10;
+      txt(g, v == null ? '—' : String(v), mx + mw / 2, my + 50 + (A[m[1]] !== B[m[1]] ? dy : 0), 27, v == null ? C.faint : accD, { w: 800, a: 'center' });
+    });
+    if (tm && A[m[1]] !== B[m[1]]) {
+      const k = seg(u, tS, tS + .3);
+      if (k > 0 && k < 1) { g.save(); g.globalAlpha = (1 - k) * .9; rr(g, mx - 5 * k, my - 5 * k, mw + 10 * k, mh + 10 * k, 13); g.strokeStyle = C.gold; g.lineWidth = 3 * (1 - k) + 1; g.stroke(); g.restore(); }
+    }
+  });
+  // 拥塞窗口
+  const wy = y + 160;
+  txt(g, '拥塞窗口', ix, wy, 16, C.ink, { w: 700 });
+  xf(g, A.cap, B.cap, u, tS, .14, (c) => txt(g, c, ix + iw, wy, 14, B.recover || A.recover ? C.orangeD : C.muted, { w: 600, a: 'right' }));
+  const cw = (iw - 11 * 4) / 12, cy = wy + 10, ch = 26;
+  const cells = (S) => {
+    for (let i = 1; i <= 12; i++) {
+      const cx = ix + (i - 1) * (cw + 4);
+      let st = 'empty';
+      if (i <= S.cwnd) st = S.ssth == null ? 'normal' : i <= S.ssth ? 'base' : (S.recover ? 'inflate' : 'normal');
+      const col = { empty: ['#EDF2F7', C.line, C.faint], normal: [C.blueS, '#76A2EF', C.blueD], base: [C.greenS, '#73BD98', C.greenD], inflate: [null, '#EF9B57', C.orangeD] }[st];
+      const lift = st === 'inflate' ? -2 : 0;
+      rr(g, cx, cy + lift, cw, ch, 4); g.fillStyle = col[0] || hatch(g); g.fill(); g.strokeStyle = col[1]; g.lineWidth = 1; g.stroke();
+      txt(g, String(i), cx + cw / 2, cy + lift + ch / 2 + 1, 11, col[2], { w: 700, a: 'center', b: 'middle' });
+    }
+  };
+  xf(g, A, B, u, tS, .16, (S) => cells(S));
+  // 报文架
+  const sy0 = wy + 64;
+  txt(g, '报文 1～15', ix, sy0 - 8, 16, C.ink, { w: 700 });
+  const bw = (iw - 4 * 7) / 5, bh = 44;
+  // 颜色与图例一致：灰=待发送 蓝=在途 橙=已到达·乱序缓存 红=丢失 紫=重传 绿=已确认
+  const COL = { pend: ['#F1F5F9', C.line, C.faint], sent: [C.blueS, '#76A2EF', C.blueD], buf: [C.orangeS, '#EF9B57', C.orangeD], loss: [C.redS, C.redM, C.red], retx: [C.purpleS, '#9C8AE5', C.purpleD], ack: [C.greenS, '#73BD98', C.greenD] };
+  for (let n = 1; n <= 15; n++) {
+    const a = A.shelf[n - 1], b = B.shelf[n - 1];
+    const bx = ix + ((n - 1) % 5) * (bw + 7), by = sy0 + 6 + Math.floor((n - 1) / 5) * (bh + 6);
+    let t = tS;
+    if (tm && a !== b) {
+      if (step === 1 || step === 3 || step === 14) t = tm.tS + (step === 3 ? (n - 4) * .03 : step === 1 ? (n - 1) * .1 : 0);
+      if (b === 'sent' && n >= 12 && step >= 9 && step <= 11) t = .72;
+      if (b === 'retx') t = .72;
+      if (b === 'buf') t = tm.tR;
+      if (b === 'loss') t = .16;
+    }
+    xf(g, a, b, u, a === b ? null : t, .12, (st) => {
+      const col = COL[st], lift = (st === 'retx' || st === 'buf') ? -2 : 0;
+      rr(g, bx, by + lift, bw, bh, 8); g.fillStyle = col[0]; g.fill();
+      if (st === 'loss') { g.setLineDash([5, 4]); g.strokeStyle = col[1]; g.lineWidth = 1.6; g.stroke(); g.setLineDash([]); }
+      else { g.strokeStyle = col[1]; g.lineWidth = 1; g.stroke(); }
+      txt(g, String(n), bx + bw / 2, by + lift + bh / 2 + 1, 21, col[2], { w: 800, a: 'center', b: 'middle' });
+    });
+  }
+}
+
+function drawReceiver(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.rcv, ix = x + 22, iw = w - 44;
+  const A = receiver(prevStep), B = receiver(step), tR = tm ? tm.tR : null;
+  const bg = g.createLinearGradient(0, y, 0, y + h); bg.addColorStop(0, '#FFFFFF'); bg.addColorStop(1, C.soft);
+  g.fillStyle = bg; g.save(); rr(g, x, y, w, h, [0, 20, 20, 0]); g.fill(); g.restore();
+  g.fillStyle = C.line; g.fillRect(x, y, 1, h);
+  rr(g, ix, y + 18, 42, 42, 12); g.fillStyle = C.greenS; g.fill();
+  txt(g, 'R', ix + 21, y + 40, 22, C.greenD, { w: 800, a: 'center', b: 'middle' });
+  txt(g, '接收方', ix + 54, y + 40, 24, C.ink, { w: 800, b: 'middle' });
+  // 期望
+  const my = y + 74, mh = 62;
+  rr(g, ix, my, iw, mh, 11); g.fillStyle = C.greenS; g.fill();
+  txt(g, '下一个期望报文', ix + 16, my + 38, 16, C.greenD, { w: 600 });
+  xf(g, A.expect, B.expect, u, tR, .14, (v, al, k) => txt(g, String(v), ix + iw - 16, my + 46 + (A.expect !== B.expect ? (v === B.expect ? 1 - k : -k) * 10 : 0), 34, C.greenD, { w: 800, a: 'right' }));
+  if (tm && A.expect !== B.expect) {
+    const k = seg(u, tR, tR + .3);
+    if (k > 0 && k < 1) { g.save(); g.globalAlpha = (1 - k) * .9; rr(g, ix - 5 * k, my - 5 * k, iw + 10 * k, mh + 10 * k, 13); g.strokeStyle = C.green; g.lineWidth = 3 * (1 - k) + 1; g.stroke(); g.restore(); }
+  }
+  // 缓存
+  const wy = y + 160;
+  txt(g, '接收缓存 4～11', ix, wy, 16, C.ink, { w: 700 });
+  const sw = (iw - 3 * 8) / 4, sh = 58;
+  for (let n = 4; n <= 11; n++) {
+    const i = n - 4, sx = ix + (i % 4) * (sw + 8), sy = wy + 12 + Math.floor(i / 4) * (sh + 8);
+    const a = A.slots[i], b = B.slots[i];
+    const t = a === b ? null : step === 12 ? tR + i * .025 : tR;
+    xf(g, a, b, u, t, .12, (st, al, k) => {
+      const col = { empty: ['#F1F5F9', C.line, C.faint], miss: [C.redS, C.redM, C.red], buf: [C.orangeS, '#EF9B57', C.orangeD], ack: [C.greenS, '#73BD98', C.greenD] }[st];
+      const pop = (st === b && a !== b && k < 1) ? 1 + .1 * Math.sin(Math.PI * k) : 1;
+      g.save(); g.translate(sx + sw / 2, sy + sh / 2); g.scale(pop, pop); g.translate(-(sx + sw / 2), -(sy + sh / 2));
+      const lift = st === 'buf' ? -2 : 0;
+      rr(g, sx, sy + lift, sw, sh, 9); g.fillStyle = col[0]; g.fill();
+      if (st === 'miss') { g.setLineDash([5, 4]); g.strokeStyle = col[1]; g.lineWidth = 1.6; g.stroke(); g.setLineDash([]); }
+      else { g.strokeStyle = col[1]; g.lineWidth = 1; g.stroke(); }
+      txt(g, String(n), sx + sw / 2, sy + lift + sh / 2 + 2, 22, col[2], { w: 800, a: 'center', b: 'middle' });
+      if (st === 'miss') txt(g, '缺', sx + sw - 7, sy + 15, 12, C.red, { w: 800, a: 'right' });
+      g.restore();
+    });
+  }
+  // 说明
+  const ny = wy + 152;
+  rr(g, ix, ny, iw, 64, [0, 8, 8, 0]); g.fillStyle = 'rgba(227,247,237,0.65)'; g.fill();
+  g.fillStyle = C.green; g.fillRect(ix, ny, 3, 64);
+  xf(g, A.note, B.note, u, tR == null ? (tm ? .1 : null) : tR, .14, (s) => wrap(g, s, ix + 14, ny + 26, iw - 24, 15, C.muted, 22));
+}
+function wrap(g, s, x, y, maxW, size, color, lh) {
+  g.font = font(size, 500); let line = '', yy = y;
+  for (const ch of s) { if (g.measureText(line + ch).width > maxW && line) { txt(g, line, x, yy, size, color, { w: 500 }); line = ch; yy += lh; } else line += ch; }
+  if (line) txt(g, line, x, yy, size, color, { w: 500 });
+}
+
+function drawChannel(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.ch;
+  g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
+  const bg = g.createLinearGradient(0, y, 0, y + h); bg.addColorStop(0, '#EEF4FF'); bg.addColorStop(.45, '#F9FBFF'); bg.addColorStop(1, '#E7EEF9');
+  g.fillStyle = bg; g.fillRect(x, y, w, h);
+  // 透视地面
+  const vA = -.25, vB = 1.2;
+  g.save();
+  const fl = g.createLinearGradient(0, fy(vA), 0, fy(vB));
+  fl.addColorStop(0, 'rgba(255,255,255,0)'); fl.addColorStop(.25, 'rgba(255,255,255,0.65)'); fl.addColorStop(1, 'rgba(231,238,249,0.9)');
+  g.beginPath(); g.moveTo(fx(-.08, vA), fy(vA)); g.lineTo(fx(1.08, vA), fy(vA)); g.lineTo(fx(1.08, vB), fy(vB)); g.lineTo(fx(-.08, vB), fy(vB)); g.closePath();
+  g.fillStyle = fl; g.fill();
+  g.lineWidth = 1;
+  for (let i = -2; i <= 18; i++) { const uu = i / 16; g.strokeStyle = `rgba(55,91,145,${0.10})`; g.beginPath(); g.moveTo(fx(uu, vA), fy(vA)); g.lineTo(fx(uu, vB), fy(vB)); g.stroke(); }
+  for (let j = 0; j <= 9; j++) { const vv = vA + (vB - vA) * (1 - Math.pow(1 - j / 9, 1.35)); g.strokeStyle = `rgba(55,91,145,${0.05 + 0.07 * (j / 9)})`; g.beginPath(); g.moveTo(fx(-.08, vv), fy(vv)); g.lineTo(fx(1.08, vv), fy(vv)); g.stroke(); }
+  // 地平线淡出
+  const hz = g.createLinearGradient(0, fy(vA) - 10, 0, fy(vA) + 40); hz.addColorStop(0, 'rgba(244,248,255,1)'); hz.addColorStop(1, 'rgba(244,248,255,0)');
+  g.fillStyle = hz; g.fillRect(x, fy(vA) - 10, w, 50);
+  // ACK 回程轨道
+  {
+    const vv = ACKV, y1 = fy(vv) + 1;
+    const lg = g.createLinearGradient(fx(0, vv), 0, fx(1, vv), 0);
+    lg.addColorStop(0, 'rgba(25,147,90,0)'); lg.addColorStop(.12, 'rgba(25,147,90,0.16)'); lg.addColorStop(.88, 'rgba(25,147,90,0.16)'); lg.addColorStop(1, 'rgba(25,147,90,0)');
+    g.strokeStyle = lg; g.lineWidth = 2; g.setLineDash([2, 8]); g.lineCap = 'round'; g.beginPath(); g.moveTo(fx(0, vv), y1); g.lineTo(fx(1, vv), y1); g.stroke(); g.setLineDash([]);
+  }
+  g.restore();
+
+  // 对象收集（按深度排序）
+  const objs = [];
+  const A = prevStep == null ? null : snap(mode, prevStep), B = snap(mode, step);
+  const add = (u_, v, kind, label, o) => objs.push({ x: fx(u_, v), y: fy(v), s: sc(v) * 1.0, v, kind, label, o: o || {} });
+  if (!tm) {
+    B.forEach(p => add(p.u, LANE[p.lane], p.kind === 'retx' ? 'retx' : 'data', p.n, { tag: p.kind === 'retx' ? '重传' : null }));
+  } else {
+    const ids = new Set([...A.keys(), ...B.keys()]);
+    const entering = [...B.keys()].filter(k => !A.has(k)), leaving = [...A.keys()].filter(k => !B.has(k));
+    ids.forEach(id => {
+      const a = A.get(id), b = B.get(id);
+      const kind = (a || b).kind === 'retx' ? 'retx' : 'data', tag = kind === 'retx' ? '重传' : null;
+      if (a && b) {
+        const k = eMove(seg(u, tm.move[0], tm.move[1]));
+        const v = lerp(LANE[a.lane], LANE[b.lane], k);
+        add(lerp(a.u, b.u, k), v, kind, b.n, { tag });
+      } else if (b) {
+        const [t0, t1] = tm.enter(entering.indexOf(id));
+        if (u < t0) return;
+        const k = eMove(seg(u, t0, t1));
+        add(lerp(-.03, b.u, k), LANE[b.lane], kind, b.n, { tag, alpha: clamp(seg(u, t0, t0 + .08)) });
+      } else if (a) {
+        if (tm.drop && id === '4') return;
+        const [t0, t1] = tm.arr(leaving.indexOf(id));
+        const k = seg(u, t0, t1);
+        if (k >= 1) return;
+        add(lerp(a.u, 1.04, eIn(k)), LANE[a.lane], kind, a.n, { tag, alpha: 1 - seg(k, .7, 1) });
+      }
+    });
+    // ACK
+    if (tm.ack) {
+      const k = seg(u, tm.ack[0], tm.ack[1]);
+      if (k > 0 && k < 1) add(lerp(1.02, -.02, eIO(k)), ACKV, 'ack', tm.ack[2], { alpha: Math.min(1, k / .08, (1 - k) / .08) });
+    }
+  }
+  // 丢包幽灵与下坠
+  const lossU = .82, lossV = LANE[0];
+  const ghost = (al) => {
+    const gx = fx(lossU, lossV), gy = fy(lossV), s = sc(lossV);
+    g.save(); g.globalAlpha *= al;
+    g.translate(gx, gy); g.scale(1, .32);
+    g.beginPath(); g.arc(0, 0, 34 * s, 0, Math.PI * 2); g.fillStyle = 'rgba(220,53,69,0.10)'; g.fill();
+    g.setLineDash([5, 4]); g.strokeStyle = 'rgba(220,53,69,0.65)'; g.lineWidth = 2.2; g.stroke(); g.setLineDash([]);
+    g.restore();
+    overlay.push(() => {
+      g.save(); g.globalAlpha *= al;
+      const my = gy - 92 * s, t = '4 丢失', fs = 14 * FS, pw = tw(g, t, fs, 800) + 34 * FS, ph = 26 * FS;
+      g.setLineDash([3, 4]); g.strokeStyle = 'rgba(220,53,69,0.55)'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(gx, my + ph / 2 - 1); g.lineTo(gx, gy - 62 * s); g.stroke(); g.setLineDash([]);
+      g.shadowColor = 'rgba(169,22,39,0.25)'; g.shadowBlur = 8; g.shadowOffsetY = 2;
+      rr(g, gx - pw / 2, my - ph / 2, pw, ph, ph / 2); g.fillStyle = '#FFFFFF'; g.fill(); g.shadowColor = 'transparent';
+      g.strokeStyle = C.redM; g.lineWidth = 1.2; g.stroke();
+      const cx0 = gx - pw / 2 + 13 * FS, q = 3 * FS;
+      g.beginPath(); g.arc(cx0, my, 7.5 * FS, 0, Math.PI * 2); g.fillStyle = C.red; g.fill();
+      g.strokeStyle = '#fff'; g.lineWidth = 2 * FS; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(cx0 - q, my - q); g.lineTo(cx0 + q, my + q); g.moveTo(cx0 + q, my - q); g.lineTo(cx0 - q, my + q); g.stroke();
+      txt(g, t, gx - pw / 2 + 25 * FS, my + 1, fs, C.redD, { w: 800, b: 'middle' });
+      g.restore();
+    });
+  };
+  const overlay = [];
+  const ghostOn = s => s >= 4 && s <= 6;
+  if (tm && tm.drop) {
+    const k = seg(u, tm.drop[0], tm.drop[1]);
+    const a = A.get('4');
+    const k1 = seg(k, 0, .22), k2 = seg(k, .22, 1);
+    const ux = a.u, v = LANE[a.lane];
+    if (k < 1) {
+      const gx = fx(ux, v) + 26 * k2, gy = fy(v) + 120 * eIn(k2);
+      objs.push({ x: gx, y: gy, s: sc(v), v: k2 > 0 ? 9 : v + .001, kind: k1 < .5 ? 'data' : 'loss', label: 4, o: { rot: k2 * .6, alpha: 1 - seg(k2, .5, 1), noShadow: k2 > .05, scale: 1 + .1 * Math.sin(Math.PI * k1) } });
+    }
+    // 落点涟漪
+    if (k1 > 0) {
+      const rk = seg(k, .1, .7);
+      if (rk > 0 && rk < 1) { const gx = fx(ux, v), gy = fy(v); g.save(); g.translate(gx, gy); g.scale(1, .32); g.globalAlpha = 1 - rk; g.strokeStyle = C.red; g.lineWidth = 3; g.beginPath(); g.arc(0, 0, 20 + 60 * rk, 0, Math.PI * 2); g.stroke(); g.restore(); }
+    }
+    ghost(seg(k, .55, .85));
+  } else if (ghostOn(step) || (tm && ghostOn(prevStep))) {
+    let al = 1;
+    if (tm && !ghostOn(step)) al = 1 - seg(u, tm.tS != null ? tm.tS : .3, (tm.tS != null ? tm.tS : .3) + .14);
+    ghost(al);
+  }
+  objs.sort((p, q) => p.v - q.v);
+  objs.forEach(o => cube(g, o.x, o.y, o.s, o.kind, o.label, o.o));
+  overlay.forEach(f => f());
+  // 无膨胀：信道空闲提示
+  const idle = s => mode === 'without' && s >= 9 && s <= 13;
+  const ia = idle(step) ? (tm && !idle(prevStep) ? seg(u, tm.tS || .3, (tm.tS || .3) + .2) : 1) : (tm && idle(prevStep) ? 1 - seg(u, 0, .15) : 0);
+  if (ia > 0) {
+    g.save(); g.globalAlpha = ia;
+    txt(g, '信道逐渐空闲', x + w / 2, fy(.42), 22 * FS, C.redD, { w: 800, a: 'center' });
+    txt(g, 'ACK 时钟中断，发送方被卡住', x + w / 2, fy(.42) + 26 * FS, 15 * FS, C.red, { w: 600, a: 'center' });
+    g.restore();
+  }
+  // 状态胶囊
+  const A2 = prevStep == null ? chanText(mode, step) : chanText(mode, prevStep);
+  xf(g, A2, chanText(mode, step), u, tm ? .02 : null, .12, (t) => {
+    const fs = 15 * FS, ph = 28 * FS, pw = tw(g, t, fs, 600) + 30 * FS, px = x + w / 2 - pw / 2, py = y + h - 12 - ph;
+    g.save(); g.shadowColor = 'rgba(33,64,112,0.08)'; g.shadowBlur = 8; rr(g, px, py, pw, ph, ph / 2); g.fillStyle = 'rgba(255,255,255,0.92)'; g.fill(); g.restore();
+    rr(g, px + .5, py + .5, pw - 1, ph - 1, ph / 2); g.strokeStyle = 'rgba(102,117,140,0.2)'; g.lineWidth = 1; g.stroke();
+    txt(g, t, x + w / 2, py + ph / 2 + 1, fs, mode === 'without' && step >= 7 && step <= 12 ? C.redD : C.muted, { w: 600, a: 'center', b: 'middle' });
+  });
+  g.restore();
+}
+
+function drawEvent(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.ev;
+  const acc = mode === 'reno' ? C.blue : C.red, accD = mode === 'reno' ? C.blueD : C.redD, accS = mode === 'reno' ? C.blueS : C.redS;
+  rr(g, x, y, w, h, [4, 14, 14, 4]); g.fillStyle = accS; g.fill();
+  g.fillStyle = acc; g.fillRect(x, y, 5, h);
+  const draw = (s, al) => {
+    g.beginPath(); g.arc(x + 46, y + h / 2, 21, 0, Math.PI * 2); g.fillStyle = acc; g.fill();
+    txt(g, s === 0 ? '—' : String(s), x + 46, y + h / 2 + 1, 17, '#FFFFFF', { w: 800, a: 'center', b: 'middle' });
+    txt(g, EV[s][0], x + 84, y + 30, 21, C.ink, { w: 800 });
+    txt(g, ev(mode, s, 1), x + 84, y + 55, 16, C.muted, { w: 500 });
+  };
+  xf(g, prevStep, step, u, tm ? 0 : null, .1, (s) => draw(s));
+  const res = (s) => ev(mode, s, 3);
+  const tC = tm ? tm.tC : null;
+  xf(g, prevStep == null ? step : prevStep, step, u, tC, .14, (s) => txt(g, res(s), x + w - 22, y + h / 2 + 1, 19, accD, { w: 800, a: 'right', b: 'middle' }));
+}
+
+function drawChart(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.cht;
+  shadowCard(g, x, y, w, h, 18, '#FFFFFF', C.line, ['rgba(33,64,112,0.07)', 22, 8]);
+  txt(g, 'cwnd 变化曲线', x + 24, y + 32, 19, C.ink, { w: 800 });
+  // 图例
+  const LG = [['数据包', C.blue], ['ACK', C.green], ['乱序缓存', C.orange], ['丢失', C.red], ['重传', C.purple]];
+  let lx = x + w - 24;
+  for (let i = LG.length - 1; i >= 0; i--) { const t = LG[i][0], tw1 = tw(g, t, 14, 500); lx -= tw1; txt(g, t, lx, y + 31, 14, C.muted, { w: 500 }); lx -= 17; rr(g, lx, y + 21, 11, 11, 3); g.fillStyle = LG[i][1]; g.fill(); lx -= 18; }
+  const px0 = x + 64, px1 = x + w - 44, py0 = y + h - 46, py1 = y + 52, vmax = 12;
+  const X = i => px0 + (px1 - px0) * i / LAST, Y = v => py0 - (py0 - py1) * v / vmax;
+  const vals = MODEL[mode].cwnd;
+  // 阶段底色
+  const tC = tm ? tm.tC : 0, kC = tm ? eOut(seg(u, tC, tC + .14)) : 1;
+  const bandA = (from) => step > from ? 1 : step === from ? (tm ? eOut(seg(u, tC, tC + .2)) : 1) : 0;
+  const b1 = bandA(7), b2 = bandA(13);
+  if (b1 > 0) { g.save(); g.globalAlpha = b1; g.fillStyle = mode === 'reno' ? 'rgba(229,107,24,0.06)' : 'rgba(220,53,69,0.06)'; g.fillRect(X(6.5), py1 - 6, X(12.5) - X(6.5), py0 - py1 + 6); txt(g, mode === 'reno' ? '快重传 · 快恢复' : '快重传 · 窗口被阻塞', X(6.5) + 10, py1 + 12, 13, mode === 'reno' ? C.orangeD : C.redD, { w: 700 }); g.restore(); }
+  if (b2 > 0) { g.save(); g.globalAlpha = b2; g.fillStyle = 'rgba(25,147,90,0.07)'; g.fillRect(X(12.5), py1 - 6, X(14) + 30 - X(12.5), py0 - py1 + 6); txt(g, '拥塞避免', X(12.5) + 10, py1 + 12, 13, C.greenD, { w: 700 }); g.restore(); }
+  // 网格
+  [0, 4, 8, 12].forEach(v => { g.strokeStyle = C.line; g.lineWidth = 1; g.beginPath(); g.moveTo(px0, Y(v)); g.lineTo(px1 + 20, Y(v)); g.stroke(); txt(g, String(v), px0 - 12, Y(v) + 5, 14, C.muted, { w: 600, a: 'right' }); });
+  XL.forEach((t, i) => txt(g, t, X(i), py0 + 26, 13, i === step ? (mode === 'reno' ? C.blueD : C.redD) : C.muted, { w: i === step ? 800 : 500, a: 'center' }));
+  // ssthresh
+  if (b1 > 0) { g.save(); g.globalAlpha = b1; g.setLineDash([6, 6]); g.strokeStyle = C.orange; g.lineWidth = 1.6; g.beginPath(); g.moveTo(px0, Y(4)); g.lineTo(px1 + 20, Y(4)); g.stroke(); g.setLineDash([]); if (mode !== 'reno') txt(g, 'ssthresh = 4', X(8.6), Y(4) + 24, 13, C.orangeD, { w: 700, a: 'center' }); g.restore(); }
+  // 未来虚线
+  g.setLineDash([5, 6]); g.strokeStyle = '#C8D2DF'; g.lineWidth = 2; g.beginPath(); vals.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); g.setLineDash([]);
+  // 已走过的曲线
+  const shown = tm ? step - 1 + kC : step, full = Math.floor(shown);
+  const acc = mode === 'reno' ? C.blue : C.red;
+  g.strokeStyle = acc; g.lineWidth = 3.5; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); for (let i = 0; i <= full; i++) i ? g.lineTo(X(i), Y(vals[i])) : g.moveTo(X(i), Y(vals[i]));
+  if (shown > full && full < LAST) { const k = shown - full; g.lineTo(lerp(X(full), X(full + 1), k), lerp(Y(vals[full]), Y(vals[full + 1]), k)); }
+  g.stroke();
+  const cur = kC >= 1 ? step : step - 1;
+  for (let i = 0; i <= full; i++) {
+    g.beginPath(); g.arc(X(i), Y(vals[i]), i === cur ? 6.5 : 4.5, 0, Math.PI * 2);
+    g.fillStyle = i === cur ? acc : '#FFFFFF'; g.fill(); g.strokeStyle = acc; g.lineWidth = i === cur ? 4 : 2; g.stroke();
+    if (i === cur) { g.save(); g.globalAlpha = .18; g.beginPath(); g.arc(X(i), Y(vals[i]), 13, 0, Math.PI * 2); g.fillStyle = acc; g.fill(); g.restore(); }
+  }
+  // 当前值
+  if (cur >= 0) {
+    const v = vals[cur], right = cur < 12;
+    txt(g, v + ' MSS', X(cur) + (right ? 12 : -12), Y(v) - 12, 15, C.ink, { w: 800, a: right ? 'left' : 'right', alpha: tm && cur === step ? kC : 1 });
+  }
+  // 例题对照标记
+  if (mode === 'reno') {
+    const mark = (cx, cy, n, t, al) => {
+      if (al <= 0) return;
+      const fs = 13, tw1 = tw(g, t, fs, 700), pw = tw1 + 36;
+      g.save(); g.globalAlpha = al; const s = .8 + .2 * eOut(clamp(al * 1.3)); g.translate(cx, cy); g.scale(s, s); g.translate(-cx, -cy);
+      rr(g, cx - pw / 2, cy - 12, pw, 24, 12); g.fillStyle = C.goldS; g.fill(); g.strokeStyle = C.gold; g.lineWidth = 1.4; g.stroke();
+      g.beginPath(); g.arc(cx - pw / 2 + 12, cy, 8.5, 0, Math.PI * 2); g.fillStyle = C.gold; g.fill();
+      txt(g, n, cx - pw / 2 + 12, cy + 1, 11, '#FFFFFF', { w: 800, a: 'center', b: 'middle' });
+      txt(g, t, cx - pw / 2 + 25, cy + 1, fs, C.goldD, { w: 700, b: 'middle' });
+      g.restore();
+    };
+    const m1 = bandA(7), m3 = bandA(13);
+    mark(X(7), (Y(7) + Y(4)) / 2 + 2, '2', '临时 cwnd = 7', m1);
+    mark(X(8.6), Y(4) + 20, '1', 'ssthresh = 4', m1);
+    mark(X(13) - 40, Y(4) + 20, '3', '新 ACK 后 cwnd = 4', m3);
+  }
+}
+
+/* ================= 手机竖屏版式（780×1320 逻辑坐标）================= */
+function card(g, r, rad) { shadowCard(g, r[0], r[1], r[2], r[3], rad || 18, '#FFFFFF', C.line, ['rgba(33,64,112,0.08)', 22, 8]); }
+const TOGGLE = { land: [1306, 12, 1588, 72, 1447], port: [503, 8, 766, 76, 637] };
+function drawHeadP(g, mode) {
+  const [x, y, w] = LY.head;
+  rr(g, x + 2, y + 17, 7, 34, 3.5); g.fillStyle = mode === 'reno' ? C.blue : C.red; g.fill();
+  txt(g, 'TCP Reno 快速恢复', x + 22, y + 46, 33, C.ink, { w: 800 });
+  const segW = 124, sx = x + w - 5 - segW * 2, sy = y + 10;
+  shadowCard(g, sx - 5, sy - 5, segW * 2 + 10, 54, 14, '#FFFFFF', C.line, ['rgba(33,64,112,0.06)', 12, 3]);
+  ['标准 Reno', '无临时膨胀'].forEach((t, i) => {
+    const on = (i === 0) === (mode === 'reno'), bx = sx + i * segW;
+    if (on) { rr(g, bx, sy, segW, 44, 10); g.fillStyle = mode === 'reno' ? C.blue : C.red; g.fill(); }
+    txt(g, t, bx + segW / 2, sy + 23, 21, on ? '#FFFFFF' : C.muted, { w: on ? 700 : 500, a: 'center', b: 'middle' });
+  });
+}
+function drawSenderP(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.snd, ix = x + 18, iw = w - 36;
+  const A = sender(mode, prevStep), B = sender(mode, step), tS = tm ? tm.tS : null;
+  const acc = mode === 'reno' ? C.blue : C.red, accD = mode === 'reno' ? C.blueD : C.redD, accS = mode === 'reno' ? C.blueS : C.redS;
+  card(g, LY.snd);
+  rr(g, ix, y + 16, 42, 42, 12); g.fillStyle = C.blueS; g.fill();
+  txt(g, 'S', ix + 21, y + 38, 23, C.blueD, { w: 800, a: 'center', b: 'middle' });
+  txt(g, '发送方', ix + 54, y + 38, 27, C.ink, { w: 800, b: 'middle' });
+  const d0 = ix + iw - 76;
+  xf(g, A.dup, B.dup, u, tS, .1, (n) => {
+    txt(g, '重复ACK', d0 - 14, y + 45, 19, C.muted, { w: 600, a: 'right' });
+    for (let i = 0; i < 3; i++) {
+      g.beginPath(); g.arc(d0 + i * 18, y + 38, 6.5, 0, Math.PI * 2);
+      if (n > i) { g.fillStyle = n >= 3 ? C.gold : acc; g.fill(); } else { g.strokeStyle = C.faint; g.lineWidth = 1.8; g.stroke(); }
+    }
+    if (n > 3) txt(g, '+' + (n - 3), d0 + 50, y + 45, 19, C.goldD, { w: 800 });
+  });
+  if (tm && A.dup === 2 && B.dup === 3) {
+    const k = seg(u, tS, tS + .32);
+    if (k > 0 && k < 1) { g.save(); g.globalAlpha = 1 - k; g.strokeStyle = C.gold; g.lineWidth = 3 * (1 - k) + 1; g.beginPath(); g.arc(d0 + 18, y + 38, 18 + 24 * k, 0, Math.PI * 2); g.stroke(); g.restore(); }
+  }
+  const mw = (iw - 16) / 3, my = y + 72, mh = 80;
+  [['cwnd', 'cwnd'], ['ssthresh', 'ssth'], ['可发送', 'avail']].forEach((m, i) => {
+    const mx = ix + i * (mw + 8);
+    rr(g, mx, my, mw, mh, 12); g.fillStyle = accS; g.fill();
+    txt(g, m[0], mx + mw / 2, my + 26, 19, C.muted, { w: 600, a: 'center' });
+    xf(g, A[m[1]], B[m[1]], u, tS, .14, (v, al, k) => {
+      const dy = (v === B[m[1]] ? 1 - k : -k) * 12;
+      txt(g, v == null ? '—' : String(v), mx + mw / 2, my + 66 + (A[m[1]] !== B[m[1]] ? dy : 0), 36, v == null ? C.faint : accD, { w: 800, a: 'center' });
+    });
+    if (tm && A[m[1]] !== B[m[1]]) {
+      const k = seg(u, tS, tS + .3);
+      if (k > 0 && k < 1) { g.save(); g.globalAlpha = (1 - k) * .9; rr(g, mx - 6 * k, my - 6 * k, mw + 12 * k, mh + 12 * k, 14); g.strokeStyle = C.gold; g.lineWidth = 3 * (1 - k) + 1; g.stroke(); g.restore(); }
+    }
+  });
+  const wy = y + 186;
+  txt(g, '拥塞窗口', ix, wy, 21, C.ink, { w: 700 });
+  xf(g, A.cap, B.cap, u, tS, .14, (c) => txt(g, c, ix + iw, wy, 19, B.recover || A.recover ? C.orangeD : C.muted, { w: 600, a: 'right' }));
+  const cw = (iw - 11 * 3) / 12, cy = wy + 11, ch = 32;
+  xf(g, A, B, u, tS, .16, (S) => {
+    for (let i = 1; i <= 12; i++) {
+      const cx = ix + (i - 1) * (cw + 3);
+      let st = 'empty';
+      if (i <= S.cwnd) st = S.ssth == null ? 'normal' : i <= S.ssth ? 'base' : (S.recover ? 'inflate' : 'normal');
+      const col = { empty: ['#EDF2F7', C.line, C.faint], normal: [C.blueS, '#76A2EF', C.blueD], base: [C.greenS, '#73BD98', C.greenD], inflate: [null, '#EF9B57', C.orangeD] }[st];
+      const lift = st === 'inflate' ? -3 : 0;
+      rr(g, cx, cy + lift, cw, ch, 5); g.fillStyle = col[0] || hatch(g); g.fill(); g.strokeStyle = col[1]; g.lineWidth = 1.2; g.stroke();
+      txt(g, String(i), cx + cw / 2, cy + lift + ch / 2 + 1, i >= 10 ? 13 : 15, col[2], { w: 700, a: 'center', b: 'middle' });
+    }
+  });
+  const sy0 = y + 262;
+  txt(g, '报文 1～15', ix, sy0, 21, C.ink, { w: 700 });
+  const bw = (iw - 4 * 6) / 5, bh = 28;
+  const COL = { pend: ['#F1F5F9', C.line, C.faint], sent: [C.blueS, '#76A2EF', C.blueD], buf: [C.orangeS, '#EF9B57', C.orangeD], loss: [C.redS, C.redM, C.red], retx: [C.purpleS, '#9C8AE5', C.purpleD], ack: [C.greenS, '#73BD98', C.greenD] };
+  for (let n = 1; n <= 15; n++) {
+    const a = A.shelf[n - 1], b = B.shelf[n - 1];
+    const bx = ix + ((n - 1) % 5) * (bw + 6), by = sy0 + 12 + Math.floor((n - 1) / 5) * (bh + 5);
+    let t = tS;
+    if (tm && a !== b) {
+      if (step === 1 || step === 3 || step === 14) t = tm.tS + (step === 3 ? (n - 4) * .03 : step === 1 ? (n - 1) * .1 : 0);
+      if (b === 'sent' && n >= 12 && step >= 9 && step <= 11) t = .72;
+      if (b === 'retx') t = .72;
+      if (b === 'buf') t = tm.tR;
+      if (b === 'loss') t = .16;
+    }
+    xf(g, a, b, u, a === b ? null : t, .12, (st) => {
+      const col = COL[st];
+      rr(g, bx, by, bw, bh, 7); g.fillStyle = col[0]; g.fill();
+      if (st === 'loss') { g.setLineDash([5, 4]); g.strokeStyle = col[1]; g.lineWidth = 1.8; g.stroke(); g.setLineDash([]); }
+      else { g.strokeStyle = col[1]; g.lineWidth = 1.2; g.stroke(); }
+      txt(g, String(n), bx + bw / 2, by + bh / 2 + 1, 19, col[2], { w: 800, a: 'center', b: 'middle' });
+    });
+  }
+}
+function drawReceiverP(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.rcv, ix = x + 18, iw = w - 36;
+  const A = receiver(prevStep), B = receiver(step), tR = tm ? tm.tR : null;
+  card(g, LY.rcv);
+  rr(g, ix, y + 16, 42, 42, 12); g.fillStyle = C.greenS; g.fill();
+  txt(g, 'R', ix + 21, y + 38, 23, C.greenD, { w: 800, a: 'center', b: 'middle' });
+  txt(g, '接收方', ix + 54, y + 38, 27, C.ink, { w: 800, b: 'middle' });
+  const my = y + 72, mh = 80;
+  rr(g, ix, my, iw, mh, 12); g.fillStyle = C.greenS; g.fill();
+  txt(g, '下一个期望报文', ix + 16, my + 48, 21, C.greenD, { w: 600 });
+  xf(g, A.expect, B.expect, u, tR, .14, (v, al, k) => txt(g, String(v), ix + iw - 16, my + 58 + (A.expect !== B.expect ? (v === B.expect ? 1 - k : -k) * 12 : 0), 44, C.greenD, { w: 800, a: 'right' }));
+  if (tm && A.expect !== B.expect) {
+    const k = seg(u, tR, tR + .3);
+    if (k > 0 && k < 1) { g.save(); g.globalAlpha = (1 - k) * .9; rr(g, ix - 6 * k, my - 6 * k, iw + 12 * k, mh + 12 * k, 14); g.strokeStyle = C.green; g.lineWidth = 3 * (1 - k) + 1; g.stroke(); g.restore(); }
+  }
+  const wy = y + 186;
+  txt(g, '接收缓存 4～11', ix, wy, 21, C.ink, { w: 700 });
+  const sw = (iw - 3 * 8) / 4, sh = 52;
+  for (let n = 4; n <= 11; n++) {
+    const i = n - 4, sx = ix + (i % 4) * (sw + 8), sy = wy + 12 + Math.floor(i / 4) * (sh + 8);
+    const a = A.slots[i], b = B.slots[i];
+    const t = a === b ? null : step === 12 ? tR + i * .025 : tR;
+    xf(g, a, b, u, t, .12, (st, al, k) => {
+      const col = { empty: ['#F1F5F9', C.line, C.faint], miss: [C.redS, C.redM, C.red], buf: [C.orangeS, '#EF9B57', C.orangeD], ack: [C.greenS, '#73BD98', C.greenD] }[st];
+      const pop = (st === b && a !== b && k < 1) ? 1 + .1 * Math.sin(Math.PI * k) : 1;
+      g.save(); g.translate(sx + sw / 2, sy + sh / 2); g.scale(pop, pop); g.translate(-(sx + sw / 2), -(sy + sh / 2));
+      rr(g, sx, sy, sw, sh, 10); g.fillStyle = col[0]; g.fill();
+      if (st === 'miss') { g.setLineDash([6, 5]); g.strokeStyle = col[1]; g.lineWidth = 2; g.stroke(); g.setLineDash([]); }
+      else { g.strokeStyle = col[1]; g.lineWidth = 1.2; g.stroke(); }
+      txt(g, String(n), sx + sw / 2, sy + sh / 2 + 2, 27, col[2], { w: 800, a: 'center', b: 'middle' });
+      if (st === 'miss') txt(g, '缺', sx + sw - 7, sy + 19, 16, C.red, { w: 800, a: 'right' });
+      g.restore();
+    });
+  }
+  const ny = y + 318;
+  rr(g, ix, ny, iw, 44, [0, 9, 9, 0]); g.fillStyle = 'rgba(227,247,237,0.75)'; g.fill();
+  g.fillStyle = C.green; g.fillRect(ix, ny, 4, 44);
+  xf(g, A.note, B.note, u, tR == null ? (tm ? .1 : null) : tR, .14, (s) => {
+    g.font = font(19, 500); const one = g.measureText(s).width <= iw - 26;
+    if (one) txt(g, s, ix + 15, ny + 29, 19, C.muted, { w: 500 }); else wrapP(g, s, ix + 15, ny + 19, iw - 24, 17, C.muted, 21);
+  });
+}
+/* 竖屏换行：英文、数字和算式（如 cwnd = 4 + 3 = 7）作为整体，不从中间断开 */
+function wrapP(g, s, x, y, maxW, size, color, lh) {
+  g.font = font(size, 500);
+  const toks = s.match(/[A-Za-z0-9][A-Za-z0-9 =+\-×÷.~～]*[A-Za-z0-9]|[A-Za-z0-9]|[\s\S]/g) || [];
+  let line = '', yy = y;
+  for (const t of toks) {
+    if (line && g.measureText(line + t).width > maxW) { txt(g, line, x, yy, size, color, { w: 500 }); line = t.replace(/^\s+/, ''); yy += lh; }
+    else line += t;
+  }
+  if (line) txt(g, line, x, yy, size, color, { w: 500 });
+}function drawEventP(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.ev;
+  const acc = mode === 'reno' ? C.blue : C.red, accD = mode === 'reno' ? C.blueD : C.redD, accS = mode === 'reno' ? C.blueS : C.redS;
+  rr(g, x, y, w, h, [5, 16, 16, 5]); g.fillStyle = accS; g.fill();
+  g.fillStyle = acc; g.fillRect(x, y, 6, h);
+  xf(g, prevStep, step, u, tm ? 0 : null, .1, (s) => {
+    g.beginPath(); g.arc(x + 46, y + 40, 25, 0, Math.PI * 2); g.fillStyle = acc; g.fill();
+    txt(g, s === 0 ? '—' : String(s), x + 46, y + 41, 22, '#FFFFFF', { w: 800, a: 'center', b: 'middle' });
+    txt(g, EV[s][0], x + 86, y + 49, 27, C.ink, { w: 800 });
+    wrapP(g, ev(mode, s, 1), x + 86, y + 82, w - 106, 20, C.muted, 26);
+  });
+  const tC = tm ? tm.tC : null;
+  xf(g, prevStep == null ? step : prevStep, step, u, tC, .14, (s) => txt(g, ev(mode, s, 3), x + w - 20, y + 48, 21, accD, { w: 800, a: 'right' }));
+}
+function drawChartP(g, mode, step, prevStep, u, tm) {
+  const [x, y, w, h] = LY.cht;
+  card(g, LY.cht);
+  txt(g, 'cwnd 变化曲线', x + 20, y + 38, 24, C.ink, { w: 800 });
+  const LG = [['数据包', C.blue], ['ACK', C.green], ['乱序缓存', C.orange], ['丢失', C.red], ['重传', C.purple]];
+  let lx = x + w - 20;
+  for (let i = LG.length - 1; i >= 0; i--) { const t = LG[i][0], tw1 = tw(g, t, 17, 500); lx -= tw1; txt(g, t, lx, y + 37, 17, C.muted, { w: 500 }); lx -= 18; rr(g, lx, y + 25, 12, 12, 3); g.fillStyle = LG[i][1]; g.fill(); lx -= 16; }
+  const px0 = x + 52, px1 = x + w - 26, py0 = y + h - 44, py1 = y + 64, vmax = 12;
+  const X = i => px0 + (px1 - px0) * i / LAST, Y = v => py0 - (py0 - py1) * v / vmax;
+  const vals = MODEL[mode].cwnd;
+  const tC = tm ? tm.tC : 0, kC = tm ? eOut(seg(u, tC, tC + .14)) : 1;
+  const bandA = (from) => step > from ? 1 : step === from ? (tm ? eOut(seg(u, tC, tC + .2)) : 1) : 0;
+  const b1 = bandA(7), b2 = bandA(13);
+  if (b1 > 0) { g.save(); g.globalAlpha = b1; g.fillStyle = mode === 'reno' ? 'rgba(229,107,24,0.06)' : 'rgba(220,53,69,0.06)'; g.fillRect(X(6.5), py1 - 8, X(12.5) - X(6.5), py0 - py1 + 8); txt(g, mode === 'reno' ? '快重传 · 快恢复' : '快重传 · 窗口被阻塞', X(6.5) + 10, py1 + 14, 17, mode === 'reno' ? C.orangeD : C.redD, { w: 700 }); g.restore(); }
+  if (b2 > 0) { g.save(); g.globalAlpha = b2; g.fillStyle = 'rgba(25,147,90,0.07)'; g.fillRect(X(12.5), py1 - 8, x + w - 10 - X(12.5), py0 - py1 + 8); txt(g, '拥塞避免', X(12.5) + 8, py1 + 14, 17, C.greenD, { w: 700 }); g.restore(); }
+  [0, 4, 8, 12].forEach(v => { g.strokeStyle = C.line; g.lineWidth = 1.2; g.beginPath(); g.moveTo(px0, Y(v)); g.lineTo(px1 + 14, Y(v)); g.stroke(); txt(g, String(v), px0 - 12, Y(v) + 6, 18, C.muted, { w: 600, a: 'right' }); });
+  for (let i = 0; i <= LAST; i++) { const on = i === step; txt(g, String(i), X(i), py0 + 30, on ? 20 : 17, on ? (mode === 'reno' ? C.blueD : C.redD) : C.muted, { w: on ? 800 : 500, a: 'center' }); }
+  if (b1 > 0) { g.save(); g.globalAlpha = b1; g.setLineDash([7, 7]); g.strokeStyle = C.orange; g.lineWidth = 2; g.beginPath(); g.moveTo(px0, Y(4)); g.lineTo(px1 + 14, Y(4)); g.stroke(); g.setLineDash([]); if (mode !== 'reno') txt(g, 'ssthresh = 4', X(8.6), Y(4) + 28, 17, C.orangeD, { w: 700, a: 'center' }); g.restore(); }
+  g.setLineDash([6, 7]); g.strokeStyle = '#C8D2DF'; g.lineWidth = 2.4; g.beginPath(); vals.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); g.setLineDash([]);
+  const shown = tm ? step - 1 + kC : step, full = Math.floor(shown);
+  const acc = mode === 'reno' ? C.blue : C.red;
+  g.strokeStyle = acc; g.lineWidth = 4.5; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); for (let i = 0; i <= full; i++) i ? g.lineTo(X(i), Y(vals[i])) : g.moveTo(X(i), Y(vals[i]));
+  if (shown > full && full < LAST) { const k = shown - full; g.lineTo(lerp(X(full), X(full + 1), k), lerp(Y(vals[full]), Y(vals[full + 1]), k)); }
+  g.stroke();
+  const cur = kC >= 1 ? step : step - 1;
+  for (let i = 0; i <= full; i++) {
+    g.beginPath(); g.arc(X(i), Y(vals[i]), i === cur ? 8 : 5.5, 0, Math.PI * 2);
+    g.fillStyle = i === cur ? acc : '#FFFFFF'; g.fill(); g.strokeStyle = acc; g.lineWidth = i === cur ? 4.5 : 2.4; g.stroke();
+    if (i === cur) { g.save(); g.globalAlpha = .18; g.beginPath(); g.arc(X(i), Y(vals[i]), 16, 0, Math.PI * 2); g.fillStyle = acc; g.fill(); g.restore(); }
+  }
+  if (cur >= 0) { const v = vals[cur], right = cur < 11; txt(g, v + ' MSS', X(cur) + (right ? 14 : -14), Y(v) - 15, 20, C.ink, { w: 800, a: right ? 'left' : 'right', alpha: tm && cur === step ? kC : 1 }); }
+  if (mode === 'reno') {
+    const mark = (cx, cy, n, t, al) => {
+      if (al <= 0) return;
+      const fs = 17, pw = tw(g, t, fs, 700) + 44;
+      g.save(); g.globalAlpha = al; const s = .8 + .2 * eOut(clamp(al * 1.3)); g.translate(cx, cy); g.scale(s, s); g.translate(-cx, -cy);
+      rr(g, cx - pw / 2, cy - 15, pw, 30, 15); g.fillStyle = C.goldS; g.fill(); g.strokeStyle = C.gold; g.lineWidth = 1.6; g.stroke();
+      g.beginPath(); g.arc(cx - pw / 2 + 15, cy, 11, 0, Math.PI * 2); g.fillStyle = C.gold; g.fill();
+      txt(g, n, cx - pw / 2 + 15, cy + 1, 14, '#FFFFFF', { w: 800, a: 'center', b: 'middle' });
+      txt(g, t, cx - pw / 2 + 31, cy + 1, fs, C.goldD, { w: 700, b: 'middle' });
+      g.restore();
+    };
+    const m1 = bandA(7), m3 = bandA(13);
+    mark(X(7), (Y(7) + Y(4)) / 2 + 2, '2', '临时 cwnd = 7', m1);
+    mark(X(8.1), Y(4) + 28, '1', 'ssthresh = 4', m1);
+    mark(Math.min(X(13) - 44, x + w - 14 - (tw(g, '新 ACK 后 cwnd = 4', 17, 700) + 44) / 2), Y(4) + 28, '3', '新 ACK 后 cwnd = 4', m3);
+  }
+}
+function drawPortrait(g, mode, step, prevStep, u, tm) {
+  const bg = g.createRadialGradient(W / 2, -160, 40, W / 2, -160, 900); bg.addColorStop(0, '#E6EEFC'); bg.addColorStop(1, C.page);
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  drawHeadP(g, mode);
+  const [sx, sy, sw, sh] = LY.ch;
+  shadowCard(g, sx, sy, sw, sh, 20, '#FFFFFF', null, ['rgba(33,64,112,0.10)', 26, 10]);
+  g.save(); rr(g, sx, sy, sw, sh, 20); g.clip();
+  drawChannel(g, mode, step, tm ? prevStep : null, u, tm);
+  g.restore();
+  rr(g, sx + .5, sy + .5, sw - 1, sh - 1, 20); g.strokeStyle = C.line; g.lineWidth = 1; g.stroke();
+  drawSenderP(g, mode, step, prevStep, u, tm);
+  drawReceiverP(g, mode, step, prevStep, u, tm);
+  drawEventP(g, mode, step, tm ? prevStep : null, u, tm);
+  drawChartP(g, mode, step, prevStep, u, tm);
+}
+
+/* ---------------- 总入口 ---------------- */
+function useLayout(name, ph) {
+  if (name === 'port') { portLayout(ph); W = 780; H = PORT_H; LY = LY_PORT; P = P_PORT; FS = 1.38; }
+  else { W = 1600; H = 860; LY = LY_LAND; P = P_LAND; FS = 1; }
+}
+function draw(g, o) {
+  const mode = o.mode || 'reno', step = clamp(o.step | 0, 0, LAST), u = o.u == null ? 1 : o.u;
+  const tm = step > 0 && u < 1 ? timing(mode, step) : null, prevStep = tm ? step - 1 : step;
+  useLayout(o.layout, o.ph);
+  if (o.layout === 'port') { g.save(); g.clearRect(0, 0, W, H); drawPortrait(g, mode, step, prevStep, u, tm); g.restore(); return; }
+  g.save();
+  g.clearRect(0, 0, W, H);
+  const bg = g.createRadialGradient(W / 2, -200, 50, W / 2, -200, 1100); bg.addColorStop(0, '#E6EEFC'); bg.addColorStop(1, C.page);
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  drawHead(g, mode, step);
+  const [sx, sy, sw, sh] = LY.stage;
+  shadowCard(g, sx, sy, sw, sh, 20, '#FFFFFF', null, ['rgba(33,64,112,0.10)', 30, 12]);
+  g.save(); rr(g, sx, sy, sw, sh, 20); g.clip();
+  drawChannel(g, mode, step, tm ? prevStep : null, u, tm);
+  drawSender(g, mode, step, prevStep, u, tm);
+  drawReceiver(g, mode, step, prevStep, u, tm);
+  g.restore();
+  rr(g, sx + .5, sy + .5, sw - 1, sh - 1, 20); g.strokeStyle = C.line; g.lineWidth = 1; g.stroke();
+  drawEvent(g, mode, step, tm ? prevStep : null, u, tm);
+  drawChart(g, mode, step, prevStep, u, tm);
+  g.restore();
+}
+
+G.RenoR4 = { draw, LAST, EV, MODEL, DIMS: { land: [1600, 860], port: [780, 1320] }, PORT_MAX: 1560, TOGGLE };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+(function () {
+  var R = RenoR4, cv = document.getElementById('cv'), g = cv.getContext('2d'), app = document.getElementById('app');
+  var $ = function (id) { return document.getElementById(id); };
+  var S = { mode: 'reno', step: 0, u: 1, playing: false, t0: 0, dur: 2600, wait: 0, layout: 'land', ph: 1320 };
+  var PLAY = '<path d="M8 5.5v13l11-6.5z" fill="currentColor"/>', PAUSE = '<rect x="6.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor"/><rect x="13.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor"/>';
+  var prog = $('prog');
+  for (var i = 0; i <= R.LAST; i++) { (function (k) { var d = document.createElement('i'); d.title = '第 ' + k + ' 步'; d.onclick = function () { jump(k); }; prog.appendChild(d); })(i); }
+
+  /* ---------- 版式与尺寸 ---------- */
+  var dpr = 1, lastKey = '';
+  function fit() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var port = vw / vh < 0.9;
+    S.layout = port ? 'port' : 'land';
+    var compact = !port && vh < 520;
+    app.className = (port ? 'port' : 'land') + (compact ? ' compact' : '') + ' mode-' + S.mode;
+    var st = $('stage'), cs = getComputedStyle(st);
+    var aw = st.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    var ah = st.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    if (port) S.ph = Math.max(1320, Math.min(R.PORT_MAX, Math.floor(780 * ah / Math.max(1, aw))));
+    var D = dims(), sc = Math.min(aw / D[0], ah / D[1]);
+    if (!(sc > 0)) sc = 0.1;
+    var w = Math.floor(D[0] * sc), h = Math.floor(D[1] * sc);
+    dpr = Math.min(3, window.devicePixelRatio || 1);
+    cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    if (!port) { $('bar').style.width = ''; }
+    lastKey = '';
+  }
+  function dims() { return S.layout === 'port' ? [780, S.ph || 1320] : R.DIMS.land; }
+  function paint() {
+    var D = dims();
+    g.setTransform(cv.width / D[0], 0, 0, cv.height / D[1], 0, 0);
+    R.draw(g, S);
+  }
+  function ui() {
+    $('prev').disabled = S.step === 0 && S.u >= 1;
+    $('next').disabled = S.step === R.LAST && S.u >= 1;
+    $('ico').innerHTML = S.playing ? PAUSE : PLAY; $('playT').textContent = S.playing ? '暂停' : '播放';
+    app.className = app.className.replace(/mode-\w+/, 'mode-' + S.mode);
+    var ds = prog.children;
+    for (var k = 0; k < ds.length; k++) { ds[k].className = k === S.step ? 'on' : (k < S.step ? 'done' : ''); }
+  }
+
+  /* ---------- 操作 ---------- */
+  function advance() { if (S.step >= R.LAST) return false; S.step++; S.u = 0; S.t0 = performance.now(); return true; }
+  function jump(k) { S.playing = false; S.step = k; S.u = 1; ui(); }
+  function next() { S.playing = false; if (S.u < 1) S.u = 1; else advance(); ui(); }
+  function prev() { S.playing = false; if (S.u < 1) { S.u = 1; S.step = Math.max(0, S.step - 1); } else if (S.step > 0) { S.step--; S.u = 1; } ui(); }
+  function play() {
+    if (S.playing) S.playing = false;
+    else { S.playing = true; if (S.step >= R.LAST && S.u >= 1) { S.step = 0; S.u = 1; } if (S.u >= 1) advance(); }
+    ui();
+  }
+  function setMode(m) { if (m !== S.mode) { S.mode = m; S.u = 1; ui(); } }
+  $('next').onclick = next; $('prev').onclick = prev; $('play').onclick = play; $('reset').onclick = function () { jump(0); };
+
+  function toLogical(cx, cy) { var r = cv.getBoundingClientRect(), D = dims(); return [(cx - r.left) / r.width * D[0], (cy - r.top) / r.height * D[1]]; }
+  function onToggle(p) { var T = R.TOGGLE[S.layout]; return p[0] > T[0] && p[0] < T[2] && p[1] > T[1] && p[1] < T[3]; }
+  cv.addEventListener('click', function (e) { var p = toLogical(e.clientX, e.clientY); if (onToggle(p)) setMode(p[0] < R.TOGGLE[S.layout][4] ? 'reno' : 'without'); });
+  cv.addEventListener('mousemove', function (e) { cv.style.cursor = onToggle(toLogical(e.clientX, e.clientY)) ? 'pointer' : 'default'; });
+  // 手机：在画面上左右滑动 = 单步
+  var tx = 0, ty = 0, multi = false;
+  cv.addEventListener('touchstart', function (e) { multi = e.touches.length > 1; if (!multi) { tx = e.touches[0].clientX; ty = e.touches[0].clientY; } }, { passive: true });
+  cv.addEventListener('touchend', function (e) {
+    if (multi || !e.changedTouches.length) return;
+    var dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+    if (Math.abs(dx) > 48 && Math.abs(dy) < Math.abs(dx) * 0.6) { if (dx < 0) next(); else prev(); }
+  }, { passive: true });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+    else if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); play(); }
+  });
+
+  /* ---------- 动画循环（画面不变时不重绘） ---------- */
+  function loop(now) {
+    if (S.u < 1) { S.u = Math.min(1, (now - S.t0) / S.dur); if (S.u >= 1) { S.wait = now; ui(); } }
+    else if (S.playing && now - S.wait > 700) { if (!advance()) S.playing = false; ui(); }
+    var key = S.layout + '|' + S.ph + '|' + S.mode + '|' + S.step + '|' + S.u.toFixed(4) + '|' + cv.width + 'x' + cv.height;
+    if (key !== lastKey) { paint(); lastKey = key; }
+    requestAnimationFrame(loop);
+  }
+  var pend = 0;
+  function refit() { if (pend) return; pend = requestAnimationFrame(function () { pend = 0; fit(); ui(); }); }
+  window.addEventListener('resize', refit);
+  window.addEventListener('orientationchange', function () { setTimeout(refit, 120); setTimeout(refit, 420); });
+  fit(); ui(); requestAnimationFrame(loop);
+  window.__S = S; window.__loop = loop; window.__fit = fit;
+})();
+</script>
+</body>
+</html>
